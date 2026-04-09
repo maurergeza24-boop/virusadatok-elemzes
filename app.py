@@ -2,109 +2,158 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
 
-# Oldal konfiguráció
-st.set_page_config(page_title="Pandémia Adat Vizualizáció", layout="wide")
+# Oldal beállítása
+st.set_page_config(page_title="Pandémia Adatvizualizáló", layout="wide")
 
-st.title("Interaktív Adatvizualizáció és Trendszimuláció")
+st.title("Interaktív Trendvizualizáció és Szimuláció")
+st.markdown("""
+Ez az alkalmazás a megadott Google Sheet adatait dolgozza fel. 
+A szimuláció a valós adatok mozgóátlaga és napi volatilitása alapján készül.
+""")
 
-# Google Sheets elérhetőség (CSV export formátumban)
+# Adatok beöltése a Google Sheets-ből
 sheet_id = "1e4VEZL1xvsALoOIq9V2SQuICeQrT5MtWfBm32ad7i8Q"
 gid = "311133316"
 url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
 @st.cache_data
-def load_data():
+def load_and_clean_data():
+    # Beolvasás
     df = pd.read_csv(url)
     
-    # Csak a kért oszlopok megtartása (A az idő, a többi a megadott betűk alapján)
-    # L=11, O=14, S=18, T=19, U=20 indexű oszlopok (0-tól kezdve)
-    selected_columns = [0, 11, 14, 18, 19, 20]
-    df = df.iloc[:, selected_columns]
+    # A kért oszlopok: A(0), L(11), O(14), S(18), T(19), U(20)
+    # Az oszlopok indexelése 0-tól indul
+    indices = [0, 11, 14, 18, 19, 20]
+    df = df.iloc[:, indices]
     
-    # Oszlopok elnevezése
-    df.columns = ['Dátum', 'Aktív fertőzöttek száma', 'Hatósági házi karantén', 
-                  'Új gyógyultak száma', 'Kórházi ápoltak száma', 'Lélegeztetőgépen lévők száma']
+    # Oszlopok elnevezése a kérés szerint
+    df.columns = [
+        'Dátum', 
+        'Aktív fertőzöttek száma', 
+        'Hatósági házi karantén', 
+        'Új gyógyultak száma', 
+        'Kórházi ápoltak száma', 
+        'Lélegeztetőgépen lévők száma'
+    ]
     
-    # Dátum konvertálása
+    # Dátum formázása
     df['Dátum'] = pd.to_datetime(df['Dátum'], errors='coerce')
     df = df.dropna(subset=['Dátum'])
+    df = df.sort_values('Dátum')
     
-    # Numerikus értékek tisztítása és hiányzó/nulla adatok simítása interpolációval
+    # Adatok simítása: 0-ák és hiányzó adatok interpolálása
     for col in df.columns[1:]:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-        # A 0 értékeket NaN-ra cseréljük, hogy az interpoláció kitöltse őket
+        # A 0-át hibás adatnak tekintjük a kérés szerint, és interpoláljuk
         df[col] = df[col].replace(0, np.nan)
         df[col] = df[col].interpolate(method='linear', limit_direction='both')
+        # Ha maradt NaN (pl. az elején), azt 0-ra állítjuk
+        df[col] = df[col].fillna(0)
         
     return df
 
 try:
-    data = load_data()
+    df = load_and_clean_data()
 
-    # Legördülő menü a szempontokhoz
-    options = data.columns[1:].tolist()
-    selected_col = st.selectbox("Válasszon egy szempontot a vizualizációhoz:", options)
+    # Legördülő menü az oszlopok kiválasztásához
+    features = df.columns[1:].tolist()
+    selected_feature = st.selectbox("Válasszon egy szempontot:", features)
 
-    # Statisztikai számítások
-    y_values = data[selected_col].values
-    mean_val = np.mean(y_values)
+    # Aktuális adatsor kinyerése
+    y_real = df[selected_feature].values
+    dates = df['Dátum']
+
+    # --- Statisztikai számítások ---
+    mean_val = np.mean(y_real)
     
-    # Aszimmetrikus szórás számítása
-    above_mean = y_values[y_values > mean_val]
-    below_mean = y_values[y_values <= mean_val]
+    # Eltérés az átlagtól (Felső és Alsó szórás kérés szerint)
+    diff_above = y_real[y_real > mean_val] - mean_val
+    diff_below = mean_val - y_real[y_real <= mean_val]
     
-    std_upper = np.mean(np.abs(above_mean - mean_val)) if len(above_mean) > 0 else 0
-    std_lower = np.mean(np.abs(below_mean - mean_val)) if len(below_mean) > 0 else 0
+    std_upper = np.mean(diff_above) if len(diff_above) > 0 else 0
+    std_lower = np.mean(diff_below) if len(diff_below) > 0 else 0
 
-    # Szimuláció funkció
-    def generate_simulation(original_data):
-        # Napi változások (százalékos elmozdulás a trendhez)
-        returns = np.diff(original_data) / original_data[:-1]
-        returns = np.nan_to_num(returns, nan=0, posinf=0, neginf=0)
+    # --- Trendszimuláció Modell ---
+    def run_trend_simulation(data_series):
+        n = len(data_series)
+        # 7 napos mozgóátlag a trend irányának meghatározásához
+        rolling_trend = pd.Series(data_series).rolling(window=7, min_periods=1).mean().values
+        # Napi ugrálások (volatilitás) mértéke
+        daily_diffs = np.diff(data_series)
+        volatility = np.std(daily_diffs) if len(daily_diffs) > 0 else 1
         
-        avg_return = np.mean(returns)
-        std_return = np.std(returns)
+        simulated = np.zeros(n)
+        simulated[0] = data_series[0]
         
-        # Új sorozat generálása (Random Walk with Drift)
-        simulated = [original_data[0]]
-        for i in range(len(original_data)-1):
-            next_val = simulated[-1] * (1 + np.random.normal(avg_return, std_return))
-            simulated.append(max(0, next_val)) # Ne legyen negatív
-        return np.array(simulated)
+        for i in range(1, n):
+            # A trend faktor: merre mozdult el a mozgóátlag az előző naphoz képest
+            trend_step = rolling_trend[i] - rolling_trend[i-1]
+            # Véletlenszerű zaj a valós adatok ingadozása alapján
+            noise = np.random.normal(0, volatility * 0.7) 
+            
+            # Új érték = előző szimulált érték + trend iránya + zaj
+            val = simulated[i-1] + trend_step + noise
+            simulated[i] = max(0, val) # Ne legyen negatív
+            
+        return simulated
 
-    # Új szimuláció gomb
-    if 'sim_data' not in st.session_state or st.button("Új szimuláció"):
-        st.session_state.sim_data = generate_simulation(y_values)
+    # Szimuláció gomb kezelése
+    if 'current_sim' not in st.session_state or st.button("Új szimuláció"):
+        st.session_state.current_sim = run_trend_simulation(y_real)
 
-    # Grafikon készítése Plotly-val
+    # --- Vizualizáció Plotly-val ---
     fig = go.Figure()
 
-    # 1. Valós értékek
-    fig.add_trace(go.Scatter(x=data['Dátum'], y=y_values, name="Valós értékek", line=dict(color='blue', width=2)))
+    # 1. Valós adatok (Kék)
+    fig.add_trace(go.Scatter(
+        x=dates, y=y_real, name="Valós értékek",
+        line=dict(color='#1f77b4', width=3)
+    ))
 
-    # 2. Átlag
-    fig.add_trace(go.Scatter(x=data['Dátum'], y=[mean_val]*len(data), name="Átlag", line=dict(color='gray', dash='dash')))
+    # 2. Átlag (Fekete szaggatott)
+    fig.add_trace(go.Scatter(
+        x=dates, y=[mean_val]*len(df), name="Átlag",
+        line=dict(color='black', dash='dash', width=2)
+    ))
 
-    # 3. Felső szórás
-    fig.add_trace(go.Scatter(x=data['Dátum'], y=[mean_val + std_upper]*len(data), name="Felső szórás", line=dict(color='green', width=1, dash='dot')))
+    # 3. Felső szórás (Zöld pontozott)
+    fig.add_trace(go.Scatter(
+        x=dates, y=[mean_val + std_upper]*len(df), name="Felső szórás",
+        line=dict(color='#2ca02c', dash='dot', width=1.5)
+    ))
 
-    # 4. Alsó szórás
-    fig.add_trace(go.Scatter(x=data['Dátum'], y=[mean_val - std_lower]*len(data), name="Alsó szórás", line=dict(color='orange', width=1, dash='dot')))
+    # 4. Alsó szórás (Narancs pontozott)
+    fig.add_trace(go.Scatter(
+        x=dates, y=[mean_val - std_lower]*len(df), name="Alsó szórás",
+        line=dict(color='#ff7f0e', dash='dot', width=1.5)
+    ))
 
-    # 5. Szimulált értékek
-    fig.add_trace(go.Scatter(x=data['Dátum'], y=st.session_state.sim_data, name="Szimulált értékek", line=dict(color='red', width=2)))
+    # 5. Szimulált értékek (Piros)
+    fig.add_trace(go.Scatter(
+        x=dates, y=st.session_state.current_sim, name="Szimulált értékek",
+        line=dict(color='#d62728', width=2)
+    ))
 
+    # Grafikon kinézetének finomhangolása
     fig.update_layout(
-        xaxis_title="Idő",
-        yaxis_title="Mennyiség",
-        legend_title="Jelmagyarázat",
-        hovermode="x unified"
+        height=600,
+        xaxis_title="Idő (Dátum)",
+        yaxis_title="Érték / Mennyiség",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
+        template="plotly_white"
     )
 
+    # Grafikon megjelenítése
     st.plotly_chart(fig, use_container_width=True)
 
+    # Statisztikai adatok megjelenítése kártyákon (opcionális extra)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Átlagos érték", f"{mean_val:.2f}")
+    col2.metric("Felső eltérés (átlagtól)", f"{std_upper:.2f}")
+    col3.metric("Alsó eltérés (átlagtól)", f"{std_lower:.2f}")
+
 except Exception as e:
-    st.error(f"Hiba történt az adatok feldolgozása során: {e}")
-    st.info("Ellenőrizze, hogy a Google Sheet linkje publikusan elérhető-e!")
+    st.error(f"Hiba történt az adatok feldolgozása közben: {e}")
+    st.info("Kérjük, ellenőrizze, hogy a Google Sheet publikusan megosztható-e a link birtokában!")
