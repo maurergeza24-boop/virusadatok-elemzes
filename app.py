@@ -85,7 +85,7 @@ try:
     fig.add_trace(go.Scatter(x=data['Dátum'], y=y_values, name="Valós értékek", line=dict(color='blue', width=2)))
 
     # 2. Átlag
-    fig.add_trace(go.Scatter(x=data['Dát_um'], y=[mean_val]*len(data), name="Átlag", line=dict(color='gray', dash='dash')))
+    fig.add_trace(go.Scatter(x=data['Dátum'], y=[mean_val]*len(data), name="Átlag", line=dict(color='gray', dash='dash')))
 
     # 3. Felső szórás
     fig.add_trace(go.Scatter(x=data['Dátum'], y=[mean_val + std_upper]*len(data), name="Felső szórás", line=dict(color='green', width=1, dash='dot')))
